@@ -47,7 +47,7 @@ Use device-code sign-in:
 .\Get-IntuneGroupInventory.ps1 -UseDeviceCode
 ```
 
-By default, Excel export is enabled. To generate only CSV files:
+By default, Excel export is enabled. To skip the workbook and create only the CSV and log:
 
 ```powershell
 .\Get-IntuneGroupInventory.ps1 -ExportExcel:$false
@@ -59,7 +59,7 @@ The script caches the group inventory and direct memberships locally per tenant 
 .\Get-IntuneGroupInventory.ps1 -ScanGroups:$true
 ```
 
-The cache is stored under the current user's local application data folder in `IntuneGroupInventory`. Other Intune objects are still queried from Graph on each run.
+The cache is stored under the current user's temporary folder in `IntuneGroupInventory`. Other Intune objects are still queried from Graph on each run. When a new cache is saved, older cache files for that tenant in this temporary cache folder are removed; the previous LocalAppData location is not read.
 
 Specify a tenant, output directory, CSV delimiter, or maximum nested-group depth:
 
@@ -75,14 +75,13 @@ List the endpoints and permissions used by the script without running the invent
 
 ## Output
 
-Unless `-OutputPath` is specified, output is written to a timestamped `IntuneGroupAnalysis_<timestamp>` folder under the current user's Documents folder. The script creates:
+Unless `-OutputPath` is specified, output is written to a timestamped `IntuneGroupAnalysis_<timestamp>` folder under the current user's Documents folder. By default, the script creates three files:
 
-- `GroupSummary.csv` — one summary row per group, including membership counts and possible deletion-candidate status
-- `GroupUsage.csv` — direct and indirect usage details
-- `GroupMembership.csv` — nested group relationships
-- `AnalysisErrors.csv` — warnings, errors, checks, and known limitations
-- `AnalysisLog.txt` — run progress and summary
-- `IntuneGroupAnalysis.xlsx` — when the `ImportExcel` module is installed and Excel export is enabled
+- `IntuneGroupAnalysis.xlsx` — the `Group Usage` worksheet is the workbook's main (and only) worksheet; it includes each group's `MemberCount` but omits ID columns and `Details`. Those fields remain in the CSV. Requires the `ImportExcel` module.
+- `IntuneGroupAnalysis.csv` — a consolidated CSV containing group summaries, usage details, and nested group relationships. Use the `RecordType` column to distinguish the row types.
+- `IntuneGroupAnalysis.log` — run progress, errors, warnings, checks, and known limitations.
+
+The tenant-specific group and membership cache is stored in the user's temporary folder; it is not an output report.
 
 The default CSV delimiter is a semicolon. Use `-CsvDelimiter ','` to select a comma.
 
@@ -90,5 +89,5 @@ The default CSV delimiter is a semicolon. Use `-CsvDelimiter ','` to select a co
 
 - A group with no detected Intune usage is **not necessarily safe to delete**. Review other services and dependencies manually.
 - The script does not inventory group usage in Exchange, SharePoint, Teams, Planner, Azure RBAC, Conditional Access, license assignments, Entra app assignments, or third-party applications.
-- Some Intune features are not included; consult `AnalysisErrors.csv` for the limitations recorded by the script.
+- Some Intune features are not included; consult `IntuneGroupAnalysis.log` for the limitations recorded by the script.
 - Intune endpoints are read through the Microsoft Graph beta API, whose schemas can change.

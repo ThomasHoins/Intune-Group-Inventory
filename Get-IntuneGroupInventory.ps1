@@ -40,7 +40,7 @@
 .PARAMETER UseDeviceCode
     Device code sign-in instead of browser.
 .PARAMETER ExportExcel
-    Export to Excel (enabled by default; requires the ImportExcel module; without the module only CSVs are generated).
+    Export to Excel (enabled by default; requires the ImportExcel module).
 .PARAMETER CsvDelimiter
     CSV delimiter (default ';' for German Excel; ',' is possible).
 .PARAMETER MaxNestingDepth
@@ -142,7 +142,7 @@ if (-not $OutputPath) {
     $OutputPath = Join-Path $documentsPath ('IntuneGroupAnalysis_{0:yyyyMMdd_HHmmss}' -f (Get-Date))
 }
 New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-$LogFile = Join-Path $OutputPath 'AnalysisLog.txt'
+$LogFile = Join-Path $OutputPath 'IntuneGroupAnalysis.log'
 $RunStart = Get-Date
 
 $script:Errors = [System.Collections.Generic.List[object]]::new()
@@ -365,10 +365,10 @@ function Get-GroupCachePath {
     $tenantId = if ($ctx.TenantId) { [string]$ctx.TenantId } elseif ($TenantId) { $TenantId } else { '' }
     if ([string]::IsNullOrWhiteSpace($tenantId)) { return $null }
 
-    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    if ([string]::IsNullOrWhiteSpace($localAppData)) { return $null }
+    $tempPath = [IO.Path]::GetTempPath()
+    if ([string]::IsNullOrWhiteSpace($tempPath)) { return $null }
     $tenantKey = $tenantId -replace '[^a-zA-Z0-9.-]', '_'
-    Join-Path $localAppData "IntuneGroupInventory\Groups_$tenantKey.json"
+    Join-Path (Join-Path $tempPath 'IntuneGroupInventory') "Groups_$tenantKey.json"
 }
 
 function Import-GroupCache {
@@ -444,7 +444,7 @@ function Import-GroupCache {
         }
 
         $script:GroupsLoadedFromCache = $true
-        Write-Log "Loaded $($script:Groups.Count) groups and their direct memberships from local cache (age: $([math]::Floor($age.TotalHours)) hours)."
+        Write-Log "Loaded $($script:Groups.Count) groups and their direct memberships from temp cache (age: $([math]::Floor($age.TotalHours)) hours)."
         return $true
     }
     catch {
@@ -456,7 +456,7 @@ function Import-GroupCache {
 function Export-GroupCache {
     $path = Get-GroupCachePath
     if (-not $path) {
-        Write-Log 'Cannot save group cache because the tenant ID or local application data path is unavailable.' 'WARN'
+        Write-Log 'Cannot save group cache because the tenant ID or temporary path is unavailable.' 'WARN'
         return
     }
 
@@ -488,6 +488,28 @@ function Export-GroupCache {
     }
     catch {
         Write-Log "Could not save group cache '$path': $($_.Exception.Message)" 'WARN'
+        return
+    }
+
+    try {
+        $cacheName = [IO.Path]::GetFileNameWithoutExtension($path)
+        $tenantKey = $cacheName.Substring('Groups_'.Length)
+        $cacheNamePattern = "Groups_${tenantKey}*.json"
+        $cacheNameRegex = '^Groups_' + [regex]::Escape($tenantKey) + '(?:[._-].+)?\.json$'
+        $olderCaches = @(Get-ChildItem -LiteralPath $directory -Filter $cacheNamePattern -File -ErrorAction Stop |
+            Where-Object { $_.FullName -ine $path -and $_.Name -match $cacheNameRegex })
+        foreach ($olderCache in $olderCaches) {
+            try {
+                Remove-Item -LiteralPath $olderCache.FullName -Force -ErrorAction Stop
+                Write-Log "Removed older group cache: $($olderCache.FullName)"
+            }
+            catch {
+                Write-Log "Could not remove older group cache '$($olderCache.FullName)': $($_.Exception.Message)" 'WARN'
+            }
+        }
+    }
+    catch {
+        Write-Log "Could not remove older group cache files from '$directory': $($_.Exception.Message)" 'WARN'
     }
 }
 
@@ -1012,11 +1034,10 @@ function Add-KnownLimitations {
 #region Export ---------------------------------------------------------------------------------
 $Columns = @{
     GroupSummary    = @('GroupName', 'GroupId', 'GroupType', 'IsM365Group', 'IsIntuneGroup', 'IsIntuneUsed', 'MembershipType', 'MemberCount', 'UserMemberCount', 'DeviceMemberCount', 'GroupMemberCount', 'OtherMemberCount', 'IntuneObjectCount', 'IncludeCount', 'ExcludeCount', 'OtherUsageCount', 'IndirectUsageCount', 'DeletionCandidate', 'DeletionCandidateReason', 'MembershipRuleProcessingState', 'IsSynced', 'CreatedDateTime')
-    GroupUsage      = @('GroupName', 'GroupId', 'GroupType', 'IsM365Group', 'ObjectName', 'ObjectId', 'ObjectType', 'UsageType', 'IsDirect', 'ParentGroupId', 'AssignmentFilterId', 'AssignmentFilterName', 'AssignmentFilterType', 'Details', 'RootGroupId', 'NestingDepth', 'ObjectCategory')
+    GroupUsage      = @('GroupName', 'GroupId', 'GroupType', 'MemberCount', 'IsM365Group', 'ObjectName', 'ObjectId', 'ObjectType', 'UsageType', 'IsDirect', 'ParentGroupId', 'AssignmentFilterId', 'AssignmentFilterName', 'AssignmentFilterType', 'Details', 'RootGroupId', 'NestingDepth', 'ObjectCategory')
     GroupMembership = @('ParentGroupId', 'ParentGroupName', 'MemberGroupId', 'MemberGroupName', 'NestingDepth', 'Relation', 'RootGroupId', 'RootGroupName', 'Path', 'PathIds')
-    AnalysisErrors  = @('Timestamp', 'Severity', 'Category', 'Scope', 'ObjectId', 'ObjectName', 'StatusCode', 'Url', 'Message')
 }
-$GuidColumns = @('GroupId', 'ObjectId', 'ParentGroupId', 'MemberGroupId', 'RootGroupId', 'AssignmentFilterId', 'PathIds')
+$ExcelGroupUsageColumns = @($Columns.GroupUsage | Where-Object { $_ -notmatch 'Id$' -and $_ -ne 'Details' })
 
 function ConvertTo-TextRows {
     # Convert booleans and dates to text (True/False, ISO) so Excel does not reformat them
@@ -1033,27 +1054,48 @@ function ConvertTo-TextRows {
 
 function Export-Results {
     param($Summary, $Usage)
+    $memberCounts = @{}
+    foreach ($group in $Summary) { $memberCounts[[string]$group.GroupId] = $group.MemberCount }
+    $usageRows = foreach ($record in $Usage) {
+        $row = [ordered]@{}
+        foreach ($column in $Columns.GroupUsage) {
+            $row[$column] = if ($column -eq 'MemberCount') { $memberCounts[[string]$record.GroupId] } else { $record.$column }
+        }
+        [pscustomobject]$row
+    }
+
     $sets = [ordered]@{
         GroupSummary    = @($Summary)
-        GroupUsage      = @($Usage)
+        GroupUsage      = @($usageRows)
         GroupMembership = @($script:MembershipRows)
-        AnalysisErrors  = @($script:Errors)
     }
+    $csvColumns = [System.Collections.Generic.List[string]]::new()
+    $csvColumns.Add('RecordType')
     foreach ($name in $sets.Keys) {
-        $path = Join-Path $OutputPath "$name.csv"
-        $cols = $Columns[$name]
-        $rows = @(ConvertTo-TextRows -Rows $sets[$name] -Cols $cols)
-        if ($rows.Count -gt 0) {
-            $rows | Export-Csv -Path $path -NoTypeInformation -Delimiter $CsvDelimiter -Encoding utf8BOM
+        foreach ($column in $Columns[$name]) {
+            if (-not $csvColumns.Contains($column)) { $csvColumns.Add($column) }
         }
-        else {
-            ($cols | ForEach-Object { '"' + $_ + '"' }) -join $CsvDelimiter | Set-Content -Path $path -Encoding utf8BOM
-        }
-        Write-Log "CSV written: $path ($($rows.Count) lines)"
     }
+    $csvRows = foreach ($name in $sets.Keys) {
+        foreach ($record in $sets[$name]) {
+            $row = [ordered]@{ RecordType = $name }
+            foreach ($column in $Columns[$name]) { $row[$column] = $record.$column }
+            [pscustomobject]$row
+        }
+    }
+    $csvRows = @(ConvertTo-TextRows -Rows $csvRows -Cols $csvColumns.ToArray())
+    $csvPath = Join-Path $OutputPath 'IntuneGroupAnalysis.csv'
+    if ($csvRows.Count -gt 0) {
+        $csvRows | Export-Csv -Path $csvPath -Delimiter $CsvDelimiter -Encoding utf8BOM
+    }
+    else {
+        ($csvColumns | ForEach-Object { '"' + $_ + '"' }) -join $CsvDelimiter | Set-Content -Path $csvPath -Encoding utf8BOM
+    }
+    Write-Log "CSV written: $csvPath ($($csvRows.Count) lines)"
+
     if ($ExportExcel) {
         if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
-            Write-Log 'Module ImportExcel not installed - Excel export skipped (Install-Module ImportExcel -Scope CurrentUser). CSV files were created.' 'WARN'
+            Write-Log 'Module ImportExcel not installed - Excel export skipped (Install-Module ImportExcel -Scope CurrentUser).' 'WARN'
             Add-AnalysisError -Severity Warning -Category 'ExcelSkipped' -Scope 'Export' -Message 'ImportExcel not available.'
             return
         }
@@ -1061,12 +1103,14 @@ function Export-Results {
             Import-Module ImportExcel -ErrorAction Stop
             $xlsx = Join-Path $OutputPath 'IntuneGroupAnalysis.xlsx'
             if (Test-Path $xlsx) { Remove-Item $xlsx -Force }
-            foreach ($name in $sets.Keys) {
-                $cols = $Columns[$name]
-                $rows = @(ConvertTo-TextRows -Rows $sets[$name] -Cols $cols)
-                if ($rows.Count -eq 0) { $rows = @([pscustomobject](@{} + ($cols | ForEach-Object -Begin { $h = [ordered]@{} } -Process { $h[$_] = '' } -End { $h }))) }
-                $rows | Export-Excel -Path $xlsx -WorksheetName $name -TableName $name -TableStyle Medium2 -AutoFilter -AutoSize -FreezeTopRow -NoNumberConversion ($cols | Where-Object { $_ -in $GuidColumns })
+            $cols = $ExcelGroupUsageColumns
+            $excelRows = @(ConvertTo-TextRows -Rows $sets.GroupUsage -Cols $cols)
+            if ($excelRows.Count -eq 0) {
+                $emptyRow = [ordered]@{}
+                foreach ($column in $cols) { $emptyRow[$column] = '' }
+                $excelRows = @([pscustomobject]$emptyRow)
             }
+            $excelRows | Export-Excel -Path $xlsx -WorksheetName 'Group Usage' -TableName 'GroupUsage' -TableStyle Medium2 -AutoFilter -AutoSize -FreezeTopRow
             Write-Log "Excel written: $xlsx"
         }
         catch {
@@ -1110,6 +1154,21 @@ Invoke-Step 'Export' { Export-Results -Summary $script:summary -Usage $script:fi
 
 # Final log
 $runEnd = Get-Date
+foreach ($diagnostic in $script:Errors) {
+    $level = switch ($diagnostic.Severity) {
+        'Error' { 'ERROR' }
+        'Warning' { 'WARN' }
+        default { 'INFO' }
+    }
+    $context = @(
+        if ($diagnostic.StatusCode) { "StatusCode=$($diagnostic.StatusCode)" }
+        if ($diagnostic.ObjectId) { "ObjectId=$($diagnostic.ObjectId)" }
+        if ($diagnostic.ObjectName) { "ObjectName=$($diagnostic.ObjectName)" }
+        if ($diagnostic.Url) { "Url=$($diagnostic.Url)" }
+    ) -join '; '
+    $suffix = if ($context) { " [$context]" } else { '' }
+    Write-Log ("{0}/{1}: {2}{3}" -f $diagnostic.Category, $diagnostic.Scope, $diagnostic.Message, $suffix) $level
+}
 Write-Log '--- Result ---'
 Write-Log "Groups total: $($script:Groups.Count)"
 foreach ($s in $script:ScanStats.Values) {
@@ -1124,5 +1183,4 @@ Write-Log "Errors: $(@($script:Errors | Where-Object { $_.Severity -eq 'Error' }
 Write-Log "Deletion candidates (for information only, manual review!): $(@($script:summary | Where-Object { $_.DeletionCandidate }).Count)"
 foreach ($d in $script:StepDurations) { Write-Log ("  Duration {0,-55} {1,7:N1} s" -f $d.Step, $d.Seconds) }
 Write-Log ("=== Analysis finished: {0} (Total duration {1:N1} min) ===" -f $runEnd, ($runEnd - $RunStart).TotalMinutes)
-# Save the log file again at the end (AnalysisLog.txt is written continuously)
 #endregion
