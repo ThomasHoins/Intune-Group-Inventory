@@ -927,6 +927,11 @@ function Get-GroupSummary {
         $rows = @($byGroup[$g.Id])
         $direct = @($rows | Where-Object { $_ -and $_.IsDirect })
         $indirect = @($rows | Where-Object { $_ -and -not $_.IsDirect })
+        $connectedObjects = @(
+            $rows | Where-Object { $_ } | ForEach-Object {
+                '{0} [{1}] - {2} ({3})' -f $_.ObjectName, $_.ObjectType, $_.UsageType, $(if ($_.IsDirect) { 'direct' } else { 'indirect' })
+            } | Select-Object -Unique
+        ) -join ' | '
         $mi = $script:MemberInfo[$g.Id]
         $memOk = $mi -and $mi.Status -eq 'OK'
         $include = @($direct | Where-Object { $_.UsageType -eq 'Include' }).Count
@@ -959,9 +964,11 @@ function Get-GroupSummary {
             GroupName                   = $g.Name
             GroupId                     = $g.Id
             GroupType                   = $g.Class.GroupType
+            GroupSource                 = if ($g.Synced) { 'AD (synchronized)' } else { 'Entra ID (cloud)' }
             IsM365Group                 = $g.Class.IsM365Group
             IsIntuneGroup               = $g.Class.IsIntuneGroup
             IsIntuneUsed                = $used
+            ConnectedIntuneObjects      = $connectedObjects
             MembershipType              = $g.Class.MembershipType
             MemberCount                 = if ($memOk) { $mi.Users + $mi.Devices + $mi.Groups + $mi.Other } else { $null }
             UserMemberCount             = if ($memOk) { $mi.Users } else { $null }
@@ -977,6 +984,7 @@ function Get-GroupSummary {
             DeletionCandidateReason     = $reason
             MembershipRuleProcessingState = $g.RuleState
             IsSynced                    = $g.Synced
+            SyncStatus                  = if ($g.Synced) { 'Synchronized' } else { 'Not synchronized' }
             CreatedDateTime             = $g.Created
         }
     }
@@ -1033,7 +1041,8 @@ function Add-KnownLimitations {
 
 #region Export ---------------------------------------------------------------------------------
 $Columns = @{
-    GroupSummary    = @('GroupName', 'GroupId', 'GroupType', 'IsM365Group', 'IsIntuneGroup', 'IsIntuneUsed', 'MembershipType', 'MemberCount', 'UserMemberCount', 'DeviceMemberCount', 'GroupMemberCount', 'OtherMemberCount', 'IntuneObjectCount', 'IncludeCount', 'ExcludeCount', 'OtherUsageCount', 'IndirectUsageCount', 'DeletionCandidate', 'DeletionCandidateReason', 'MembershipRuleProcessingState', 'IsSynced', 'CreatedDateTime')
+    #GroupSummary    = @('GroupName', 'GroupId', 'GroupType', 'GroupSource', 'IsM365Group', 'IsIntuneGroup', 'IsIntuneUsed', 'ConnectedIntuneObjects', 'MembershipType', 'MemberCount', 'UserMemberCount', 'DeviceMemberCount', 'GroupMemberCount', 'OtherMemberCount', 'IntuneObjectCount', 'IncludeCount', 'ExcludeCount', 'OtherUsageCount', 'IndirectUsageCount', 'DeletionCandidate', 'DeletionCandidateReason', 'MembershipRuleProcessingState', 'IsSynced', 'SyncStatus', 'CreatedDateTime')
+    GroupSummary    = @('GroupName', 'GroupType', 'GroupSource', 'IsM365Group', 'IsIntuneGroup', 'IsIntuneUsed', 'ConnectedIntuneObjects', 'MembershipType', 'MemberCount', 'DeletionCandidate', 'DeletionCandidateReason', 'MembershipRuleProcessingState', 'IsSynced', 'SyncStatus', 'CreatedDateTime')
     GroupUsage      = @('GroupName', 'GroupId', 'GroupType', 'MemberCount', 'IsM365Group', 'ObjectName', 'ObjectId', 'ObjectType', 'UsageType', 'IsDirect', 'ParentGroupId', 'AssignmentFilterId', 'AssignmentFilterName', 'AssignmentFilterType', 'Details', 'RootGroupId', 'NestingDepth', 'ObjectCategory')
     GroupMembership = @('ParentGroupId', 'ParentGroupName', 'MemberGroupId', 'MemberGroupName', 'NestingDepth', 'Relation', 'RootGroupId', 'RootGroupName', 'Path', 'PathIds')
 }
@@ -1103,6 +1112,9 @@ function Export-Results {
             Import-Module ImportExcel -ErrorAction Stop
             $xlsx = Join-Path $OutputPath 'IntuneGroupAnalysis.xlsx'
             if (Test-Path $xlsx) { Remove-Item $xlsx -Force }
+            $summaryRows = @(ConvertTo-TextRows -Rows $sets.GroupSummary -Cols $Columns.GroupSummary)
+            $summaryRows | Export-Excel -Path $xlsx -WorksheetName 'Group Summary' -TableName 'GroupSummary' -TableStyle Medium2 -AutoFilter -AutoSize -FreezeTopRow
+
             $cols = $ExcelGroupUsageColumns
             $excelRows = @(ConvertTo-TextRows -Rows $sets.GroupUsage -Cols $cols)
             if ($excelRows.Count -eq 0) {
@@ -1110,7 +1122,7 @@ function Export-Results {
                 foreach ($column in $cols) { $emptyRow[$column] = '' }
                 $excelRows = @([pscustomobject]$emptyRow)
             }
-            $excelRows | Export-Excel -Path $xlsx -WorksheetName 'Group Usage' -TableName 'GroupUsage' -TableStyle Medium2 -AutoFilter -AutoSize -FreezeTopRow
+            $excelRows | Export-Excel -Path $xlsx -WorksheetName 'Group Usage' -TableName 'GroupUsage' -TableStyle Medium2 -AutoFilter -AutoSize -FreezeTopRow -Append
             Write-Log "Excel written: $xlsx"
         }
         catch {

@@ -77,8 +77,8 @@ List the endpoints and permissions used by the script without running the invent
 
 Unless `-OutputPath` is specified, output is written to a timestamped `IntuneGroupAnalysis_<timestamp>` folder under the current user's Documents folder. By default, the script creates three files:
 
-- `IntuneGroupAnalysis.xlsx` — the `Group Usage` worksheet is the workbook's main (and only) worksheet; it includes each group's `MemberCount` but omits ID columns and `Details`. Those fields remain in the CSV. Requires the `ImportExcel` module.
-- `IntuneGroupAnalysis.csv` — a consolidated CSV containing group summaries, usage details, and nested group relationships. Use the `RecordType` column to distinguish the row types.
+- `IntuneGroupAnalysis.xlsx` — the `Group Summary` worksheet lists every group, including its source (`AD (synchronized)` or `Entra ID (cloud)`), sync status, and connected Intune objects. The `Group Usage` worksheet contains the individual usage details; it omits ID columns and `Details`, which remain in the CSV. Requires the `ImportExcel` module.
+- `IntuneGroupAnalysis.csv` — a consolidated CSV containing group summaries (including connected Intune objects, source, and sync status), usage details, and nested group relationships. Use the `RecordType` column to distinguish the row types.
 - `IntuneGroupAnalysis.log` — run progress, errors, warnings, checks, and known limitations.
 
 The tenant-specific group and membership cache is stored in the user's temporary folder; it is not an output report.
